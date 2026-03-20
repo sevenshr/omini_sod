@@ -1,0 +1,12 @@
+transformers
+diffusers
+peft
+opencv-python
+protobuf
+sentencepiece
+gradio
+jupyter
+torchao
+
+
+scikit-learn
