@@ -12,11 +12,11 @@ from PIL import Image, ImageDraw
 from datasets import load_dataset
 import utils
 
-from .trainer import OminiModel, get_config, train
+from .trainer2 import OminiModel, get_config, train
 from ..pipeline.flux_omini import Condition, convert_to_condition, generate
 
 
-from ..dataset_sod.data_multi import SalObjDataset, test_dataset
+from ..dataset_sod.data_multi import SalObjDataset, test_dataset, SalObjDataset_val
 import cv2
 import torch.nn.functional as F
 import wandb
@@ -140,7 +140,7 @@ def main():
     )
 
 
-    val_dataset = SalObjDataset(
+    val_dataset = SalObjDataset_val(
         image_root=training_config["val_dataset"]["image_root"],
         gt_root=training_config["val_dataset"]["gt_root"],
         depth_root=training_config["val_dataset"]["depth_root"],

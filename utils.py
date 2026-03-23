@@ -14,20 +14,19 @@ import sod_metric
 class DDPAverager(Metric):
     def __init__(self):
         super().__init__(dist_sync_on_step=True)  # DDP 自动同步
-        self.add_state("v", default=torch.tensor(0.0), dist_reduce_fx="sum")
-        self.add_state("n", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("sum", default=torch.tensor(0.0), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0.0), dist_reduce_fx="sum")
 
-    def add(self, v, n=1.0):
-        # 自定义计算，比如这里是 abs(pred - target)**0.5
-        self.v = (self.v * self.n + v * n) / (self.n + n)
-        self.n += n
+    def update(self, value, count):
+        self.sum += value
+        self.count += count
 
-    def item(self):
-        return self.v
+    def compute(self):
+        return self.sum / self.count
 
     def reset(self):
-        self.n = 0.0
-        self.v = 0.0
+        self.sum = 0.0
+        self.count = 0.0
 
 
 class Averager():

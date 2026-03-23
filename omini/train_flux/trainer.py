@@ -13,10 +13,7 @@ from typing import List
 import prodigyopt
 
 from ..pipeline.flux_omini import transformer_forward, encode_images
-import utils
-import torch.nn.functional as F
-from ..pipeline.flux_omini import Condition, convert_to_condition, generate
-from torchmetrics import Metric
+
 
 def get_rank():
     try:
@@ -88,13 +85,7 @@ class OminiModel(L.LightningModule):
 
         self.to(device).to(dtype)
 
-        self.val_metric1 = utils.DDPAverager()
-        self.val_metric2 = utils.DDPAverager()
-        self.val_metric3 = utils.DDPAverager()
-        self.val_metric4 = utils.DDPAverager()
-        self.val_metric5 = utils.DDPAverager()
-        self.metric_fn = utils.calc_cod_single
-        self.device = device
+        
 
     def init_lora(self, lora_path: str, lora_config: dict):
         assert lora_path or lora_config
@@ -269,48 +260,6 @@ class OminiModel(L.LightningModule):
         raise NotImplementedError("Generate a sample not implemented.")
 
 
-    def test_step(self, batch, batch_idx):
-        imgs, prompts = batch["image"], batch["description"]
-        image_latent_mask = batch.get("image_latent_mask", None)
-        conditions, position_deltas, position_scales, latent_masks = [], [], [], []
-        for i in range(1000):
-            if f"condition_{i}" not in batch:
-                break
-            conditions.append(batch[f"condition_{i}"])
-            position_deltas.append(batch.get(f"position_delta_{i}", [[0, 0]]))
-            position_scales.append(batch.get(f"position_scale_{i}", [1.0])[0])
-            latent_masks.append(batch.get(f"condition_latent_mask_{i}", None))
-        
-        adapter = self.adapter_names[2]
-        generator = torch.Generator(device=self.device)
-        generator.manual_seed(42)
-
-        condition = Condition(conditions, adapter, position_deltas, position_scales)
-        pre_res = generate(
-            self.flux_pipe,
-            prompt=prompts,
-            conditions=[condition],
-            height=imgs.shape[-1],
-            width=imgs.shape[-2],
-            generator=generator,
-            model_config=self.model_config,
-            kv_cache=self.model_config.get("independent_condition", False),
-            output_type = "pt",
-            num_inference_steps = 1,
-        )
-        res = pre_res.images[0].mean(dim=0).unsqueeze(0).unsqueeze(0)
-        # import ipdb
-        # ipdb.set_trace()
-        res = F.interpolate(res, size=imgs.shape, mode='bilinear', align_corners=False)
-        res = res.sigmoid().cpu().float().numpy().squeeze()
-        res = (res - res.min()) / (res.max() - res.min() + 1e-8)
-        result1, result2, result3, result4, result5 = self.metric_fn(res, imgs)
-        self.val_metric1.add(torch.from_numpy(result1.item()).to(self.device), 1)
-        self.val_metric2.add(torch.from_numpy(result2.item()).to(self.device), 1)
-        self.val_metric3.add(torch.from_numpy(result3.item()).to(self.device), 1)
-        self.val_metric4.add(torch.from_numpy(result4.item()).to(self.device), 1)
-        self.val_metric5.add(torch.from_numpy(result5.item()).to(self.device), 1)
-
 
 class TrainingCallback(L.Callback):
     def __init__(self, run_name, training_config: dict = {}, test_function=None):
@@ -375,50 +324,16 @@ class TrainingCallback(L.Callback):
             print(
                 f"Epoch: {trainer.current_epoch}, Steps: {self.total_steps} - Generating a sample"
             )
-            # pl_module.eval()
-            # self.test_function(
-            #     pl_module,
-            #     f"{self.save_path}/{self.run_name}/output",
-            #     f"lora_{self.total_steps}",
-            # )
-            # pl_module.train()
-    def on_test_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, dataloader_idx=0,):
-        m1 = self.val_metric1.item().cpu().numpy()
-        m2 = self.val_metric2.item().cpu().numpy()
-        m3 = self.val_metric3.item().cpu().numpy()
-        m4 = self.val_metric4.item().cpu().numpy()
-        m5 = self.val_metric5.item().cpu().numpy()
-
-        print('metric1: {:.4f}'.format(m1))
-        print('metric2: {:.4f}'.format(m2))
-        print('metric3: {:.4f}'.format(m3))
-        print('metric4: {:.4f}'.format(m4))
-        print('metric5: {:.4f}'.format(m5))
-        save_path = f"{self.save_path}/{self.run_name}/output"
-        file_name = f"lora_{self.total_steps}"
-        log_path = os.path.join(save_path, 'val_metrics.txt')
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f"{file_name} metric1: {m1:.6f}, metric2: {m2:.6f}, metric3: {m3:.6f}, metric4: {m4:.6f}, metric5: {m5:.6f}\n")
-
-        # Log to WandB
-        if self.use_wandb:
-            wandb.log({
-                "val_metric1": m1,
-                "val_metric2": m2,
-                "val_metric3": m3,
-                "val_metric4": m4,
-                "val_metric5": m5,
-            })
-
-        self.val_metric1.reset()
-        self.val_metric2.reset()
-        self.val_metric3.reset()
-        self.val_metric4.reset()
-        self.val_metric5.reset()
+            pl_module.eval()
+            self.test_function(
+                pl_module,
+                f"{self.save_path}/{self.run_name}/output",
+                f"lora_{self.total_steps}",
+            )
+            pl_module.train()
 
 
-
-def train(train_dataset, trainable_model, config, test_function, val_dataset):
+def train(dataset, trainable_model, config, test_function):
     # Initialize
     is_main_process, rank = get_rank() == 0, get_rank()
     torch.cuda.set_device(rank)
@@ -437,18 +352,11 @@ def train(train_dataset, trainable_model, config, test_function, val_dataset):
         print("Config:", config)
 
     # Initialize dataloader
-    print("Dataset length:", len(train_dataset))
+    print("Dataset length:", len(dataset))
     train_loader = DataLoader(
-        train_dataset,
+        dataset,
         batch_size=training_config.get("batch_size", 1),
         shuffle=True,
-        num_workers=training_config["dataloader_workers"],
-    )
-
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=training_config.get("batch_size", 1),
-        shuffle=False,
         num_workers=training_config["dataloader_workers"],
     )
 

@@ -124,10 +124,11 @@ class Condition(object):
     def encode(
         self, pipe: FluxPipeline, empty: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        
         # condition_empty = Image.new("RGB", self.condition.size, (0, 0, 0))
-        condition_empty = Image.new("RGB", self.condition[0].shape, (0, 0, 0))
+        condition_empty = Image.new("RGB", self.condition.shape[-2:], (0, 0, 0))
         tokens, ids = encode_images(pipe, condition_empty if empty else self.condition)
-
+        
         if self.position_delta is not None:
             ids[:, 1] += self.position_delta[0]
             ids[:, 2] += self.position_delta[1]

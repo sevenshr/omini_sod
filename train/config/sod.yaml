@@ -8,7 +8,7 @@ train:
   accumulate_grad_batches: 1
   dataloader_workers: 5
   save_interval: 1000
-  sample_interval: 1000
+  sample_interval: 10000
   max_steps: -1
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs"
@@ -37,7 +37,7 @@ train:
     drop_text_prob: 0.1
     drop_image_prob: 0.1
 
-  batch_size: 1
+  batch_size: 2
   train_dataset:
     image_root: /home/shenhaoran/project/project/dataset/DUTS-TR/DUTS-TR-Image/
     gt_root: /home/shenhaoran/project/project/dataset/DUTS-TR/DUTS-TR-Mask/

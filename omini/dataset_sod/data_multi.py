@@ -164,7 +164,49 @@ class SalObjDataset(data.Dataset):
                 **({"position_scale_0": self.position_scale} if self.position_scale != 1.0 else {}),
             }
 
+    def filter_files(self):
+        assert len(self.images) == len(self.gts) and len(self.gts) == len(self.images)
+        images = []
+        gts = []
+        depths = []
+        for img_path, gt_path, depth_path in zip(self.images, self.gts, self.depths):
+            # print(img_path)
+            # print(gt_path)
+            # print(depth_path)
+            img = Image.open(img_path)
+            gt = Image.open(gt_path)
+            depth = Image.open(depth_path)
+            # if img.size == gt.size and gt.size == depth.size:
+            images.append(img_path)
+            gts.append(gt_path)
+            depths.append(depth_path)
+        self.images = images
+        self.gts = gts
+        self.depths = depths
 
+    def rgb_loader(self, path):
+        with open(path, 'rb') as f:
+            img = Image.open(f)
+            return img.convert('RGB')
+
+    def binary_loader(self, path):
+        with open(path, 'rb') as f:
+            img = Image.open(f)
+            return img.convert('L')
+
+    def resize(self, img, gt, depth):
+        assert img.size == gt.size and gt.size == depth.size
+        w, h = img.size
+        if h < self.trainsize or w < self.trainsize:
+            h = max(h, self.trainsize)
+            w = max(w, self.trainsize)
+            return img.resize((w, h), Image.BILINEAR), gt.resize((w, h), Image.NEAREST), depth.resize((w, h),
+                                                                                                      Image.NEAREST)
+        else:
+            return img, gt, depth
+
+    def __len__(self):
+        return self.size
 
 class SalObjDataset_val(data.Dataset):
     def __init__(self, image_root, gt_root, depth_root, trainsize,
@@ -211,7 +253,7 @@ class SalObjDataset_val(data.Dataset):
 
         position_delta = np.array([0, 0])
         description = "give the saliency map of the image"
-        name = self.images[self.index].split('/')[-1]
+        name = self.images[index].split('/')[-1]
         if name.endswith('.jpg'):
             name = name.split('.jpg')[0] + '.png'
         
