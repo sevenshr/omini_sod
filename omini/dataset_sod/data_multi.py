@@ -5,8 +5,9 @@ import torchvision.transforms as transforms
 import random
 import numpy as np
 from PIL import ImageEnhance
-
-
+import torch
+from torch.utils.data import Sampler
+import math
 # several data augumentation strategies
 def cv_random_flip(img, label, depth):
     flip_flag = random.randint(0, 1)
@@ -44,6 +45,37 @@ def randomRotation(image, label, depth):
         label = label.rotate(random_angle, mode)
         depth = depth.rotate(random_angle, mode)
     return image, label, depth
+
+
+
+def cv_random_flip_two(img, label):
+    flip_flag = random.randint(0, 1)
+
+    if flip_flag == 1:
+        img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        label = label.transpose(Image.FLIP_LEFT_RIGHT)
+    return img, label
+
+
+def randomCrop_two(image, label):
+    border = 30
+    image_width = image.size[0]
+    image_height = image.size[1]
+    crop_win_width = np.random.randint(image_width - border, image_width)
+    crop_win_height = np.random.randint(image_height - border, image_height)
+    random_region = (
+        (image_width - crop_win_width) >> 1, (image_height - crop_win_height) >> 1, (image_width + crop_win_width) >> 1,
+        (image_height + crop_win_height) >> 1)
+    return image.crop(random_region), label.crop(random_region)
+
+
+def randomRotation_two(image, label):
+    mode = Image.BICUBIC
+    if random.random() > 0.8:
+        random_angle = np.random.randint(-15, 15)
+        image = image.rotate(random_angle, mode)
+        label = label.rotate(random_angle, mode)
+    return image, label
 
 
 def colorEnhance(image):
@@ -208,6 +240,523 @@ class SalObjDataset(data.Dataset):
     def __len__(self):
         return self.size
 
+
+
+class RGBSalObjDataset(data.Dataset):
+    def __init__(self, datasets, imgsize, mode,
+                 condition_size=(512, 512), target_size=(512, 512), condition_type: str = "canny",
+                 drop_text_prob: float = 0.1, drop_image_prob: float = 0.1, return_pil_image: bool = False,
+                 position_scale=1.0):
+        self.imgsize = imgsize
+        if type(datasets) != list:
+            datasets = [datasets]
+        self.datas_id = []
+        self.mode = mode
+        
+        for (i, dataset) in enumerate(datasets):
+            if mode == 'train':
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgb_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/train.txt'
+
+            else:
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgb_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/test.txt'
+
+            imgset_file = open(imgset_path)
+
+            for line in imgset_file:
+                data = {}
+                img_path = line.strip("\n").split(" ")[0]
+                gt_path = line.strip("\n").split(" ")[1]
+                data['img_path'] = data_dir + img_path
+                data['gt_path'] = data_dir + gt_path
+                data['dataset'] = dataset
+                self.datas_id.append(data)
+
+
+        self.img_transform = transforms.Compose([
+            transforms.Resize((self.imgsize, self.imgsize)),
+            transforms.ToTensor(),
+            # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ])
+        if self.mode =="train":
+            self.gt_transform = transforms.Compose([
+                transforms.Resize((self.imgsize, self.imgsize)),
+                transforms.ToTensor()])
+        else:
+            self.gt_transform = transforms.Compose([
+                transforms.ToTensor()])
+        self.depths_transform = transforms.Compose(
+            [transforms.Resize((self.imgsize, self.imgsize)), transforms.ToTensor()])
+
+        self.position_scale = position_scale
+        self.condition_type = condition_type
+
+
+    def __getitem__(self, index):
+
+        assert os.path.exists(self.datas_id[index]['img_path']), (
+            '{} does not exist'.format(self.datas_id[index]['img_path']))
+        assert os.path.exists(self.datas_id[index]['gt_path']), (
+            '{} does not exist'.format(self.datas_id[index]['gt_path']))
+
+        image = Image.open(self.datas_id[index]['img_path']).convert('RGB')
+        gt = Image.open(self.datas_id[index]['gt_path']).convert('L')
+        if self.mode == 'train':
+            image, gt = cv_random_flip_two(image, gt)
+            image, gt = randomCrop_two(image, gt)
+            image, gt = randomRotation_two(image, gt)
+            image = colorEnhance(image)
+
+        image = self.img_transform(image)
+        gt = self.gt_transform(gt)
+        
+        position_delta = np.array([0, 0])
+        description = "RGB to mask"
+
+        if self.mode == 'train':
+            gt = gt.repeat(3, 1, 1)  
+
+        sample = {
+                "image": gt,
+                "condition_0": image,
+                "position_delta_0": position_delta,
+                "condition_type_0": self.condition_type,
+                "description": description,
+                "dataset": self.datas_id[index]['dataset'],
+                "name": self.datas_id[index]['gt_path'].split('/')[-1]
+                
+            }
+        if self.position_scale != 1.0:
+            sample["position_scale_0"] = self.position_scale
+    
+        return sample
+
+    def __len__(self):
+        return len(self.datas_id)
+
+
+
+class RGBDSalObjDataset(data.Dataset):
+    def __init__(self, datasets, imgsize, mode,
+                 condition_size=(512, 512), target_size=(512, 512), condition_type: str = "canny",
+                 drop_text_prob: float = 0.1, drop_image_prob: float = 0.1, return_pil_image: bool = False,
+                 position_scale=1.0):
+        self.imgsize = imgsize
+        if type(datasets) != list:
+            datasets = [datasets]
+        self.datas_id = []
+        self.mode = mode
+        
+        for (i, dataset) in enumerate(datasets):
+            if mode == 'train':
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgbd_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/train.txt'
+
+            else:
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgbd_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/test.txt'
+
+            imgset_file = open(imgset_path)
+
+            for line in imgset_file:
+                data = {}
+                img_path = line.strip("\n").split(" ")[0]
+                gt_path = line.strip("\n").split(" ")[1]
+                depth_path = line.strip("\n").split(" ")[2]
+                data['img_path'] = data_dir + img_path
+                data['gt_path'] = data_dir + gt_path
+                data['depth_path'] = data_dir + depth_path
+                data['dataset'] = dataset
+                self.datas_id.append(data)
+
+
+        self.img_transform = transforms.Compose([
+            transforms.Resize((self.imgsize, self.imgsize)),
+            transforms.ToTensor(),
+            # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ])
+        if self.mode =="train":
+            self.gt_transform = transforms.Compose([
+                transforms.Resize((self.imgsize, self.imgsize)),
+                transforms.ToTensor()])
+        else:
+            self.gt_transform = transforms.Compose([
+                transforms.ToTensor()])
+        self.depths_transform = transforms.Compose(
+            [transforms.Resize((self.imgsize, self.imgsize)), transforms.ToTensor()])
+
+        self.position_scale = position_scale
+        self.condition_type = condition_type
+
+
+    def __getitem__(self, index):
+
+        assert os.path.exists(self.datas_id[index]['img_path']), (
+            '{} does not exist'.format(self.datas_id[index]['img_path']))
+        assert os.path.exists(self.datas_id[index]['gt_path']), (
+            '{} does not exist'.format(self.datas_id[index]['gt_path']))
+        assert os.path.exists(self.datas_id[index]['depth_path']), (
+                '{} does not exist'.format(self.datas_id[index]['depth_path']))
+
+        image = Image.open(self.datas_id[index]['img_path']).convert('RGB')
+        gt = Image.open(self.datas_id[index]['gt_path']).convert('L')
+        depth = Image.open(self.datas_id[index]['depth_path']).convert('RGB')
+
+        if self.mode == 'train':
+            image, gt, depth = cv_random_flip(image, gt, depth)
+            image, gt, depth = randomCrop(image, gt, depth)
+            image, gt, depth = randomRotation(image, gt, depth)
+            image = colorEnhance(image)
+
+        image = self.img_transform(image)
+        gt = self.gt_transform(gt)
+        depth = self.depths_transform(depth)
+        position_delta = np.array([0, 0])
+        description = "RGB and depth to mask"
+
+        if self.mode == 'train':
+            gt = gt.repeat(3, 1, 1) 
+    
+
+
+        sample = {
+                "image": gt,
+                "condition_0": image,
+                "position_delta_0": position_delta,
+                "condition_type_0": self.condition_type,
+                "condition_1": depth,
+                "position_delta_1": position_delta,
+                "condition_type_1": self.condition_type,
+                "description": description,
+                "dataset": self.datas_id[index]['dataset'],
+                "name": self.datas_id[index]['gt_path'].split('/')[-1]
+                
+            }
+        if self.position_scale != 1.0:
+            sample["position_scale_0"] = self.position_scale
+            sample["position_scale_1"] = self.position_scale
+    
+        return sample
+
+    def __len__(self):
+        return len(self.datas_id)
+
+
+class RGBTSalObjDataset(data.Dataset):
+    def __init__(self, datasets, imgsize, mode,
+                 condition_size=(512, 512), target_size=(512, 512), condition_type: str = "canny",
+                 drop_text_prob: float = 0.1, drop_image_prob: float = 0.1, return_pil_image: bool = False,
+                 position_scale=1.0):
+        self.imgsize = imgsize
+        if type(datasets) != list:
+            datasets = [datasets]
+        self.datas_id = []
+        self.mode = mode
+        
+        for (i, dataset) in enumerate(datasets):
+            if mode == 'train':
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgbt_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/train.txt'
+
+            else:
+                data_dir = '/root/user-data/dataset/shr_data/unisod/rgbt_dataset/{}'.format(dataset)
+                imgset_path = data_dir + '/test.txt'
+
+            imgset_file = open(imgset_path)
+
+            for line in imgset_file:
+                data = {}
+                img_path = line.strip("\n").split(" ")[0]
+                gt_path = line.strip("\n").split(" ")[1]
+                thermal_path = line.strip("\n").split(" ")[2]
+                data['img_path'] = data_dir + img_path
+                data['gt_path'] = data_dir + gt_path
+                data['thermal_path'] = data_dir + thermal_path
+                data['dataset'] = dataset
+                self.datas_id.append(data)
+
+
+        self.img_transform = transforms.Compose([
+            transforms.Resize((self.imgsize, self.imgsize)),
+            transforms.ToTensor(),
+            # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+            ])
+        if self.mode =="train":
+            self.gt_transform = transforms.Compose([
+                transforms.Resize((self.imgsize, self.imgsize)),
+                transforms.ToTensor()])
+        else:
+            self.gt_transform = transforms.Compose([
+                transforms.ToTensor()])
+        self.thermals_transform = transforms.Compose(
+            [transforms.Resize((self.imgsize, self.imgsize)), transforms.ToTensor()])
+
+        self.position_scale = position_scale
+        self.condition_type = condition_type
+
+
+    def __getitem__(self, index):
+
+        assert os.path.exists(self.datas_id[index]['img_path']), (
+            '{} does not exist'.format(self.datas_id[index]['img_path']))
+        assert os.path.exists(self.datas_id[index]['gt_path']), (
+            '{} does not exist'.format(self.datas_id[index]['gt_path']))
+        assert os.path.exists(self.datas_id[index]['thermal_path']), (
+                '{} does not exist'.format(self.datas_id[index]['thermal_path']))
+
+        image = Image.open(self.datas_id[index]['img_path']).convert('RGB')
+        gt = Image.open(self.datas_id[index]['gt_path']).convert('L')
+        thermal = Image.open(self.datas_id[index]['thermal_path']).convert('RGB')
+
+        if self.mode == 'train':
+            image, gt, thermal = cv_random_flip(image, gt, thermal)
+            image, gt, thermal = randomCrop(image, gt, thermal)
+            image, gt, thermal = randomRotation(image, gt, thermal)
+            image = colorEnhance(image)
+
+        image = self.img_transform(image)
+        gt = self.gt_transform(gt)
+        thermal = self.thermals_transform(thermal)
+        position_delta = np.array([0, 0])
+        description = "RGB and thermal to mask"
+
+        if self.mode == 'train':
+            gt = gt.repeat(3, 1, 1) 
+
+
+        sample = {
+                "image": gt,
+                "condition_0": image,
+                "position_delta_0": position_delta,
+                "condition_type_0": self.condition_type,
+                "condition_1": thermal,
+                "position_delta_1": position_delta,
+                "condition_type_1": self.condition_type,
+                "description": description,
+                "dataset": self.datas_id[index]['dataset'],
+                "name": self.datas_id[index]['gt_path'].split('/')[-1]
+                
+            }
+        if self.position_scale != 1.0:
+            sample["position_scale_0"] = self.position_scale
+            sample["position_scale_1"] = self.position_scale
+    
+        return sample
+
+    def __len__(self):
+        return len(self.datas_id)
+
+            
+
+    def __len__(self):
+        return len(self.datas_id)
+
+class MultiDataset(data.Dataset):
+    def __init__(self, datasets: dict):
+        self.datasets = datasets
+        self.names = list(datasets.keys())
+        self.offsets = {}
+        offset = 0
+        for n in self.names:
+            self.offsets[n] = offset
+            offset += len(datasets[n])
+        self.total_len = offset
+
+    def __len__(self):
+        return self.total_len
+
+    def __getitem__(self, global_idx):
+        for n in self.names:
+            start = self.offsets[n]
+            end = start + len(self.datasets[n])
+            if start <= global_idx < end:
+                local_idx = global_idx - start
+                sample = self.datasets[n][local_idx]
+
+                return sample, n
+        raise IndexError
+
+
+class MultiSampler(torch.utils.data.Sampler):
+    def __init__(
+        self,
+        datasets: dict,
+        batch_size: int,
+        weights: dict = None,
+        rank: int = 0,
+        world_size: int = 1,
+        seed: int = 42,
+    ):
+        self.datasets = datasets
+        self.names = list(datasets.keys())
+        self.batch_size = batch_size
+
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.epoch = 0
+
+        # offsets（global index）
+        self.offsets = {}
+        offset = 0
+        for name in self.names:
+            self.offsets[name] = offset
+            offset += len(datasets[name])
+
+        # weights
+        if weights is None:
+            weights = {n: 1.0 for n in self.names}
+        w = torch.tensor([weights[n] for n in self.names], dtype=torch.float)
+        self.probs = (w / w.sum())
+        
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    def _shuffle_dataset(self, name, seed):
+        g = torch.Generator()
+        g.manual_seed(seed)
+        idx = torch.randperm(len(self.datasets[name]), generator=g)
+
+        if self.world_size > 1:
+            idx = idx[self.rank::self.world_size]
+
+        return idx.tolist()
+
+    def __iter__(self):
+        refresh_count = {n: 0 for n in self.names}
+
+        def build_seed(name):
+            # 不同 epoch、不同 dataset、不同 refresh 都有不同随机流
+            return self.seed + self.epoch * 100000 + self.names.index(name) * 1000 + refresh_count[name]
+
+        indices = {}
+        ptrs = {}
+        for n in self.names:
+            indices[n] = self._shuffle_dataset(n, build_seed(n))
+            ptrs[n] = 0
+
+        while True:
+            task_idx = torch.multinomial(self.probs, 1).item()
+            task = self.names[task_idx]
+            batch = []
+
+            for _ in range(self.batch_size):
+                if ptrs[task] >= len(indices[task]):
+                    refresh_count[task] += 1
+                    indices[task] = self._shuffle_dataset(task, build_seed(task))
+                    ptrs[task] = 0
+
+                local_idx = indices[task][ptrs[task]]
+                global_idx = self.offsets[task] + local_idx
+                batch.append(global_idx)
+                ptrs[task] += 1
+
+            yield batch
+
+
+
+
+class DDPSampler(torch.utils.data.Sampler):
+    def __init__(
+        self,
+        datasets: dict,
+        batch_size: int,
+        weights: dict = None,
+        rank: int = 0,
+        world_size: int = 1,
+        seed: int = 42,
+        total_steps: int = 1000000,   # ⭐ 控制训练长度
+    ):
+        self.datasets = datasets
+        self.names = sorted(datasets.keys())
+        self.batch_size = batch_size
+
+        self.rank = rank
+        self.world_size = world_size
+        self.seed = seed
+        self.epoch = 0
+        self.total_steps = total_steps
+
+        # offsets（global index）
+        self.offsets = {}
+        offset = 0
+        for name in self.names:
+            self.offsets[name] = offset
+            offset += len(datasets[name])
+
+        # weights
+        if weights is None:
+            weights = {n: 1.0 for n in self.names}
+        w = torch.tensor([weights[n] for n in self.names], dtype=torch.float)
+        self.probs = (w / w.sum())
+
+    def set_epoch(self, epoch):
+        self.epoch = epoch
+
+    # 🔥 DDP安全shuffle（长度完全一致）
+    def _shuffle_dataset(self, name, g):
+        full = torch.randperm(len(self.datasets[name]), generator=g)
+
+        if self.world_size > 1:
+            total = len(full)
+            pad = (self.world_size - total % self.world_size) % self.world_size
+
+            if pad > 0:
+                full = torch.cat([full, full[:pad]])
+
+            full = full.view(self.world_size, -1)
+            idx = full[self.rank]
+        else:
+            idx = full
+
+        return idx.tolist()
+
+    def __iter__(self):
+        g = torch.Generator()
+        g.manual_seed(self.seed + self.epoch)
+
+        # 🔥 所有GPU共享完全一致的task schedule
+        schedule = torch.multinomial(
+            self.probs,
+            num_samples=self.total_steps,
+            replacement=True,
+            generator=g,
+        ).tolist()
+
+        # 初始化各dataset
+        indices = {n: self._shuffle_dataset(n, g) for n in self.names}
+        ptrs = {n: 0 for n in self.names}
+
+        for task_idx in schedule:
+            task = self.names[task_idx]
+
+            batch = []
+            for _ in range(self.batch_size):
+                if ptrs[task] >= len(indices[task]):
+                    # 🔥 用完立即reshuffle（各GPU同步）
+                    indices[task] = self._shuffle_dataset(task, g)
+                    ptrs[task] = 0
+
+                local_idx = indices[task][ptrs[task]]
+                global_idx = self.offsets[task] + local_idx
+
+                batch.append(global_idx)
+                ptrs[task] += 1
+
+            yield batch
+
+    def __len__(self):
+        return self.total_steps
+
+
+
+
+
+
+
+
 class SalObjDataset_val(data.Dataset):
     def __init__(self, image_root, gt_root, depth_root, trainsize,
                  condition_size=(512, 512), target_size=(512, 512), condition_type: str = "canny",
@@ -314,6 +863,7 @@ class SalObjDataset_val(data.Dataset):
 
     def __len__(self):
         return self.size
+
 
 
 

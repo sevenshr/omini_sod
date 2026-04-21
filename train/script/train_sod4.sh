@@ -16,4 +16,4 @@ accelerate launch \
   --mixed_precision bf16 \
   --dynamo_backend no \
   --main_process_port 41370 \
-  -m omini.train_flux.train_sod2_multi
+  -m omini.train_flux.train_sod2_multi_ddp

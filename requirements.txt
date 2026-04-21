@@ -7,6 +7,8 @@ sentencepiece
 gradio
 jupyter
 torchao
-
-
+addict
+modelscope
 scikit-learn
+datasets
+prodigyopt

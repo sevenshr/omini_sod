@@ -1,4 +1,5 @@
-flux_path: "/home/shenhaoran/project/project/OminiControl-main/flux2"
+flux_path: "/root/user-data/shrcode/omini_sod/flux2"
+sd_path: "/root/user-data/shrcode/omini_sod/sd3.5"
 dtype: "bfloat16"
 
 model:
@@ -7,9 +8,9 @@ model:
 train:
   accumulate_grad_batches: 1
   dataloader_workers: 5
-  save_interval: 1000
-  sample_interval: 10000
-  max_steps: -1
+  save_interval: 5000
+  sample_interval: 5000
+  max_steps: 50000
   gradient_checkpointing: true # (Turn off for faster training)
   save_path: "runs"
 
@@ -37,16 +38,16 @@ train:
     drop_text_prob: 0.1
     drop_image_prob: 0.1
 
-  batch_size: 2
+  batch_size: 32
   train_dataset:
-    image_root: /home/shenhaoran/project/project/dataset/DUTS-TR/DUTS-TR-Image/
-    gt_root: /home/shenhaoran/project/project/dataset/DUTS-TR/DUTS-TR-Mask/
-    depth_root: /home/shenhaoran/project/project/dataset/DUTS-TR/DUTS-TR-Image/
+    image_root: /root/user-data/dataset/shr_data/DUTS-TR/DUTS-TR-Image/
+    gt_root: /root/user-data/dataset/shr_data/DUTS-TR/DUTS-TR-Mask/
+    depth_root: /root/user-data/dataset/shr_data/DUTS-TR/DUTS-TR-Image/
     trainsize: 512
   val_dataset:
-    image_root: /home/shenhaoran/project/project/dataset/DUTS-TE/DUTS-TE-Image/
-    gt_root: /home/shenhaoran/project/project/dataset/DUTS-TE/DUTS-TE-Mask/
-    depth_root: /home/shenhaoran/project/project/dataset/DUTS-TE/DUTS-TE-Image/
+    image_root: /root/user-data/dataset/shr_data/DUTS-TE/DUTS-TE-Image/
+    gt_root: /root/user-data/dataset/shr_data/DUTS-TE/DUTS-TE-Mask/
+    depth_root: /root/user-data/dataset/shr_data/DUTS-TE/DUTS-TE-Image/
     valsize: 512
 
   wandb:
@@ -60,16 +61,17 @@ train:
     # (Uncomment the following lines to train less parameters while keeping the similar performance)
     # target_modules: "(.*(?<!single_)transformer_blocks\\.[0-9]+\\.norm1\\.linear|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_k|.*(?<!single_)transformer_blocks\\.[0-9]+\\.attn\\.to_q|.*single_transformer_blocks\\.[0-9]+\\.norm\\.linear|.*single_transformer_blocks\\.[0-9]+\\.attn.to_k|.*single_transformer_blocks\\.[0-9]+\\.attn.to_q)"
 
-  optimizer:
-    type: "Prodigy"
-    params:
-      lr: 1
-      use_bias_correction: true
-      safeguard_warmup: true
-      weight_decay: 0.01
+  # optimizer:
+  #   type: "Prodigy"
+  #   params:
+  #     lr: 1
+  #     use_bias_correction: true
+  #     safeguard_warmup: true
+  #     weight_decay: 0.01
 
   # (To use AdamW Optimizer, uncomment the following lines)
-  # optimizer:
-  #   type: AdamW
-  #   lr: 1e-4
-  #   weight_decay: 0.001
+  optimizer:
+    type: AdamW
+    params:
+      lr: 0.0001
+      weight_decay: 0.001

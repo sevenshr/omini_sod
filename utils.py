@@ -28,6 +28,31 @@ class DDPAverager(Metric):
         self.sum = 0.0
         self.count = 0.0
 
+class AveragerDDP(Metric):
+    full_state_update = False
+
+    def __init__(self, use_device = "cuda"):
+        super().__init__(dist_sync_on_step=False)
+        self.add_state("sum", default=torch.tensor(0.0).to(use_device), dist_reduce_fx="sum")
+        self.add_state("count", default=torch.tensor(0.0).to(use_device), dist_reduce_fx="sum")
+
+    def update(self, value, count=1):
+        # 统一转到 metric 自己 state 所在设备
+        if not torch.is_tensor(value):
+            value = torch.tensor(value, device=self.sum.device, dtype=self.sum.dtype)
+        else:
+            value = value.to(device=self.sum.device, dtype=self.sum.dtype)
+
+        if not torch.is_tensor(count):
+            count = torch.tensor(count, device=self.count.device, dtype=self.count.dtype)
+        else:
+            count = count.to(device=self.count.device, dtype=self.count.dtype)
+
+        self.sum += value
+        self.count += count
+
+    def compute(self):
+        return self.sum / self.count.clamp_min(1e-12)
 
 class Averager():
 
@@ -219,7 +244,7 @@ def calc_cod_p(y_pred, y_true):
     
     return  maxfm, wfm, em, sm, mae, fm_curve, p_curve,r_curve,
 
-def calc_cod_(y_pred, y_true):
+def calc_cod_multi(y_pred, y_true):
     batchsize = y_true.shape[0]
 
     metric_FM = sod_metric.Fmeasure(beta=0.3)
@@ -232,7 +257,7 @@ def calc_cod_(y_pred, y_true):
 
         for i in range(batchsize):
             true, pred = \
-                y_true[i, 0].cpu().data.numpy() * 255, y_pred[i, 0].cpu().data.numpy() * 255
+                y_true[i] * 255, y_pred[i] * 255
 
             metric_FM.step(pred=pred, gt=true)
             metric_WFM.step(pred=pred, gt=true)

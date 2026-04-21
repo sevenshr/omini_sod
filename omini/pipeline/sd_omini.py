@@ -1,18 +1,17 @@
 import torch
 from typing import List, Union, Optional, Dict, Any, Callable, Type, Tuple
 
-from diffusers.pipelines import FluxPipeline
-from diffusers.pipelines.flux.pipeline_flux import (
-    FluxPipelineOutput,
-    FluxTransformer2DModel,
+from diffusers.pipelines import StableDiffusion3Pipeline
+from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3 import (
+    StableDiffusion3PipelineOutput,
+    SD3Transformer2DModel,
     calculate_shift,
     retrieve_timesteps,
-    np,
 )
 from diffusers.models.attention_processor import Attention, F
 from diffusers.models.embeddings import apply_rotary_emb
 from transformers import pipeline
-
+import numpy as np
 from peft.tuners.tuners_utils import BaseTunerLayer
 from accelerate.utils import is_torch_version
 
@@ -35,9 +34,9 @@ def clip_hidden_states(hidden_states: torch.FloatTensor) -> torch.FloatTensor:
     return hidden_states
 
 
-def encode_images(pipeline: FluxPipeline, images: torch.Tensor):
+def encode_images(pipeline: StableDiffusion3Pipeline, images: torch.Tensor):
     """
-    Encodes the images into tokens and ids for FLUX pipeline.
+    Encodes the images into tokens and ids for sd3 pipeline.
     """
     input_device = pipeline.device
     images = pipeline.image_processor.preprocess(images)
@@ -46,24 +45,9 @@ def encode_images(pipeline: FluxPipeline, images: torch.Tensor):
     images = (
         images - pipeline.vae.config.shift_factor
     ) * pipeline.vae.config.scaling_factor
-    images_tokens = pipeline._pack_latents(images, *images.shape)
-    images_ids = pipeline._prepare_latent_image_ids(
-        images.shape[0],
-        images.shape[2],
-        images.shape[3],
-        input_device,
-        pipeline.dtype,
-    )
-    if images_tokens.shape[1] != images_ids.shape[0]:
-        images_ids = pipeline._prepare_latent_image_ids(
-            images.shape[0],
-            images.shape[2] // 2,
-            images.shape[3] // 2,
-            input_device,
-            pipeline.dtype,
-        )
 
-    return images_tokens, images_ids
+
+    return images
 
 
 depth_pipe = None
@@ -123,26 +107,17 @@ class Condition(object):
         self.is_complement = is_complement
 
     def encode(
-        self, pipe: FluxPipeline, empty: bool = False
+        self, pipe: StableDiffusion3Pipeline, empty: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor, int]:
         
         # condition_empty = Image.new("RGB", self.condition.size, (0, 0, 0))
         condition_empty = Image.new("RGB", self.condition.shape[-2:], (0, 0, 0))
-        tokens, ids = encode_images(pipe, condition_empty if empty else self.condition)
-        if self.position_delta is not None:
-            ids[:, 1] += self.position_delta[0]
-            ids[:, 2] += self.position_delta[1]
-
-        if self.position_scale != 1.0:
-            scale_bias = (self.position_scale - 1.0) / 2
-            ids[:, 1:] *= self.position_scale
-            ids[:, 1:] += scale_bias
+        tokens = encode_images(pipe, condition_empty if empty else self.condition)
 
         if self.latent_mask is not None:
             tokens = tokens[:, self.latent_mask]
-            ids = ids[self.latent_mask]
 
-        return tokens, ids
+        return tokens
 
 
 @contextmanager
@@ -187,25 +162,26 @@ def attn_forward(
     **kwargs: dict,
 ) -> torch.FloatTensor:
     bs, _, _ = hidden_states[0].shape
-    h2_n = len(hidden_states2)
+    h2_n = len(hidden_states2) if hidden_states2 is not None else 0
 
     queries, keys, values = [], [], []
 
     # Prepare query, key, value for each encoder hidden state (text branch)
-    for i, hidden_state in enumerate(hidden_states2):
-        query = attn.add_q_proj(hidden_state)
-        key = attn.add_k_proj(hidden_state)
-        value = attn.add_v_proj(hidden_state)
+    if hidden_states2 is not None:
+        for i, hidden_state in enumerate(hidden_states2):
+            query = attn.add_q_proj(hidden_state)
+            key = attn.add_k_proj(hidden_state)
+            value = attn.add_v_proj(hidden_state)
 
-        head_dim = key.shape[-1] // attn.heads
-        reshape_fn = lambda x: x.view(bs, -1, attn.heads, head_dim).transpose(1, 2)
+            head_dim = key.shape[-1] // attn.heads
+            reshape_fn = lambda x: x.view(bs, -1, attn.heads, head_dim).transpose(1, 2)
 
-        query, key, value = map(reshape_fn, (query, key, value))
-        query, key = attn.norm_added_q(query), attn.norm_added_k(key)
+            query, key, value = map(reshape_fn, (query, key, value))
+            query, key = attn.norm_added_q(query), attn.norm_added_k(key)
 
-        queries.append(query)
-        keys.append(key)
-        values.append(value)
+            queries.append(query)
+            keys.append(key)
+            values.append(value)
 
     # Prepare query, key, value for each hidden state (image branch)
     for i, hidden_state in enumerate(hidden_states):
@@ -218,7 +194,10 @@ def attn_forward(
         reshape_fn = lambda x: x.view(bs, -1, attn.heads, head_dim).transpose(1, 2)
 
         query, key, value = map(reshape_fn, (query, key, value))
-        query, key = attn.norm_q(query), attn.norm_k(key)
+        if attn.norm_q is not None:
+            query = attn.norm_q(query)
+        if attn.norm_k is not None:
+            key = attn.norm_k(key)
 
         queries.append(query)
         keys.append(key)
@@ -257,9 +236,12 @@ def attn_forward(
 
     # Reshape attention output to match the original hidden states
     h_out, h2_out = [], []
-
-    for i, hidden_state in enumerate(hidden_states2):
-        h2_out.append(attn.to_add_out(attn_outputs[i]))
+    if hidden_states2 is not None:
+        for i, hidden_state in enumerate(hidden_states2):
+            if not attn.context_pre_only:
+                h2_out.append(attn.to_add_out(attn_outputs[i]))
+            else:
+                h2_out.append(attn_outputs[i])
 
     for i, hidden_state in enumerate(hidden_states):
         h = attn_outputs[i + h2_n]
@@ -277,7 +259,6 @@ def block_forward(
     text_hidden_states: List[torch.FloatTensor],
     tembs: List[torch.FloatTensor],
     adapters: List[str],
-    position_embs=None,
     attn_forward=attn_forward,
     **kwargs: dict,
 ):
@@ -286,93 +267,84 @@ def block_forward(
     img_variables, txt_variables = [], []
 
     for i, text_h in enumerate(text_hidden_states):
-        txt_variables.append(self.norm1_context(text_h, emb=tembs[i]))
+        if self.context_pre_only:
+            txt_variables.append(self.norm1_context(text_h, tembs[i]))
+        else:
+            txt_variables.append(self.norm1_context(text_h, emb=tembs[i]))
 
     for i, image_h in enumerate(image_hidden_states):
         with specify_lora((self.norm1.linear,), adapters[i + txt_n]):
             img_variables.append(self.norm1(image_h, emb=tembs[i + txt_n]))
 
     # Attention.
+
     img_attn_output, txt_attn_output = attn_forward(
         self.attn,
         hidden_states=[each[0] for each in img_variables],
-        hidden_states2=[each[0] for each in txt_variables],
-        position_embs=position_embs,
+        hidden_states2=[each for each in txt_variables] if self.context_pre_only else [each[0] for each in txt_variables],
         adapters=adapters,
         **kwargs,
     )
 
-    text_out = []
-    for i in range(len(text_hidden_states)):
-        _, gate_msa, shift_mlp, scale_mlp, gate_mlp = txt_variables[i]
-        text_h = text_hidden_states[i] + txt_attn_output[i] * gate_msa.unsqueeze(1)
-        norm_h = (
-            self.norm2_context(text_h) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
-        )
-        text_h = self.ff_context(norm_h) * gate_mlp.unsqueeze(1) + text_h
-        text_out.append(clip_hidden_states(text_h))
+    if self.use_dual_attention:
+        img_attn_output2 = attn_forward(
+        self.attn2,
+        hidden_states=[each[5] for each in img_variables],
+        adapters=adapters,
+        **kwargs,
+    )
 
     image_out = []
     for i in range(len(image_hidden_states)):
-        _, gate_msa, shift_mlp, scale_mlp, gate_mlp = img_variables[i]
+        if self.use_dual_attention:
+            _, gate_msa, shift_mlp, scale_mlp, gate_mlp, _, gate_msa2  = img_variables[i]
+        else:
+            _, gate_msa, shift_mlp, scale_mlp, gate_mlp = img_variables[i]
         image_h = (
             image_hidden_states[i] + img_attn_output[i] * gate_msa.unsqueeze(1)
         ).to(image_hidden_states[i].dtype)
+        if self.use_dual_attention:
+            image_h = image_h + img_attn_output2[i] * gate_msa2.unsqueeze(1)
+
         norm_h = self.norm2(image_h) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
         with specify_lora((self.ff.net[2],), adapters[i + txt_n]):
-            image_h = image_h + self.ff(norm_h) * gate_mlp.unsqueeze(1)
+            if self._chunk_size is not None:
+                image_h = image_h + self._chunked_feed_forward(self.ff, norm_h, self._chunk_dim, self._chunk_size) * gate_mlp.unsqueeze(1)
+            else:
+                image_h = image_h + self.ff(norm_h) * gate_mlp.unsqueeze(1)
+        
         image_out.append(clip_hidden_states(image_h))
+
+
+    text_out = []
+    for i in range(len(text_hidden_states)):
+        if self.context_pre_only:
+            text_out.append(None)
+        else:
+            _, gate_msa, shift_mlp, scale_mlp, gate_mlp = txt_variables[i]
+            text_h = text_hidden_states[i] + txt_attn_output[i] * gate_msa.unsqueeze(1)
+            norm_h = (
+                self.norm2_context(text_h) * (1 + scale_mlp[:, None]) + shift_mlp[:, None]
+            )
+            if self._chunk_size is not None:
+                text_h = chunked_feed_forward(self.ff_context, norm_h, self._chunk_dim, self._chunk_size) * gate_mlp.unsqueeze(1) + text_h
+            else:
+                text_h = self.ff_context(norm_h) * gate_mlp.unsqueeze(1) + text_h
+            text_out.append(clip_hidden_states(text_h))
+
     return image_out, text_out
 
 
-def single_block_forward(
-    self,
-    hidden_states: List[torch.FloatTensor],
-    tembs: List[torch.FloatTensor],
-    adapters: List[str],
-    position_embs=None,
-    attn_forward=attn_forward,
-    **kwargs: dict,
-):
-    mlp_hidden_states, gates = [[None for _ in hidden_states] for _ in range(2)]
-
-    hidden_state_norm = []
-    for i, hidden_state in enumerate(hidden_states):
-        # [NOTE]!: This function's output is slightly DIFFERENT from the original
-        # FLUX version. In the original implementation, the gates were computed using
-        # the combined hidden states from both the image and text branches. Here, each
-        # branch computes its gate using only its own hidden state.
-        with specify_lora((self.norm.linear, self.proj_mlp), adapters[i]):
-            h_norm, gates[i] = self.norm(hidden_state, emb=tembs[i])
-            mlp_hidden_states[i] = self.act_mlp(self.proj_mlp(h_norm))
-        hidden_state_norm.append(h_norm)
-
-    attn_outputs = attn_forward(
-        self.attn, hidden_state_norm, adapters, position_embs=position_embs, **kwargs
-    )
-
-    h_out = []
-    for i in range(len(hidden_states)):
-        with specify_lora((self.proj_out,), adapters[i]):
-            h = torch.cat([attn_outputs[i], mlp_hidden_states[i]], dim=2)
-            h = gates[i].unsqueeze(1) * self.proj_out(h) + hidden_states[i]
-            h_out.append(clip_hidden_states(h))
-
-    return h_out
 
 
 def transformer_forward(
-    transformer: FluxTransformer2DModel,
+    transformer: SD3Transformer2DModel,
     image_features: List[torch.Tensor],
     text_features: List[torch.Tensor] = None,
-    img_ids: List[torch.Tensor] = None,
-    txt_ids: List[torch.Tensor] = None,
     pooled_projections: List[torch.Tensor] = None,
     timesteps: List[torch.LongTensor] = None,
-    guidances: List[torch.Tensor] = None,
     adapters: List[str] = None,
     # Assign the function to be used for the forward pass
-    single_block_forward=single_block_forward,
     block_forward=block_forward,
     attn_forward=attn_forward,
     **kwargs: dict,
@@ -384,10 +356,11 @@ def transformer_forward(
     assert len(adapters) == len(timesteps)
 
     # Preprocess the image_features
+    height, width = image_features[0].shape[-2:]
     image_hidden_states = []
     for i, image_feature in enumerate(image_features):
-        with specify_lora((self.x_embedder,), adapters[i + txt_n]):
-            image_hidden_states.append(self.x_embedder(image_feature))
+        with specify_lora((self.pos_embed.proj,), adapters[i + txt_n]):
+            image_hidden_states.append(self.pos_embed(image_feature))
 
     # Preprocess the text_features
     text_hidden_states = []
@@ -396,19 +369,10 @@ def transformer_forward(
 
     # Prepare embeddings of (timestep, guidance, pooled_projections)
     assert len(timesteps) == len(image_features) + len(text_features)
-
-    def get_temb(timestep, guidance, pooled_projection):
+    def get_temb(timestep, pooled_projection):
         timestep = timestep.to(image_hidden_states[0].dtype) * 1000
-        if guidance is not None:
-            guidance = guidance.to(image_hidden_states[0].dtype) * 1000
-            return self.time_text_embed(timestep, guidance, pooled_projection)
-        else:
-            return self.time_text_embed(timestep, pooled_projection)
-
-    tembs = [get_temb(*each) for each in zip(timesteps, guidances, pooled_projections)]
-
-    # Prepare position embeddings for each token
-    position_embs = [self.pos_embed(each) for each in (*txt_ids, *img_ids)]
+        return self.time_text_embed(timestep, pooled_projection)
+    tembs = [get_temb(*each) for each in zip(timesteps, pooled_projections)]
 
     # Prepare the gradient checkpointing kwargs
     gckpt_kwargs: Dict[str, Any] = (
@@ -422,7 +386,6 @@ def transformer_forward(
             "image_hidden_states": image_hidden_states,
             "text_hidden_states": text_hidden_states,
             "tembs": tembs,
-            "position_embs": position_embs,
             "adapters": adapters,
             "attn_forward": attn_forward,
             **kwargs,
@@ -434,36 +397,33 @@ def transformer_forward(
         else:
             image_hidden_states, text_hidden_states = block_forward(**block_kwargs)
 
-    # combine image and text hidden states then pass through the single transformer blocks
-    all_hidden_states = [*text_hidden_states, *image_hidden_states]
-    for block in self.single_transformer_blocks:
-        block_kwargs = {
-            "self": block,
-            "hidden_states": all_hidden_states,
-            "tembs": tembs,
-            "position_embs": position_embs,
-            "adapters": adapters,
-            "attn_forward": attn_forward,
-            **kwargs,
-        }
-        if self.training and self.gradient_checkpointing:
-            all_hidden_states = torch.utils.checkpoint.checkpoint(
-                single_block_forward, **block_kwargs, **gckpt_kwargs
-            )
-        else:
-            all_hidden_states = single_block_forward(**block_kwargs)
 
-    image_hidden_states = self.norm_out(all_hidden_states[txt_n], tembs[txt_n])
-    output = self.proj_out(image_hidden_states)
+    image_hidden_states = self.norm_out(image_hidden_states[0], tembs[0])
+    hidden_states = self.proj_out(image_hidden_states)
+
+    # unpatchify
+    patch_size = self.config.patch_size
+    height = height // patch_size
+    width = width // patch_size
+
+    hidden_states = hidden_states.reshape(
+        shape=(hidden_states.shape[0], height, width, patch_size, patch_size, self.out_channels)
+    )
+    hidden_states = torch.einsum("nhwpqc->nchpwq", hidden_states)
+    output = hidden_states.reshape(
+        shape=(hidden_states.shape[0], self.out_channels, height * patch_size, width * patch_size)
+    )
+
 
     return (output,)
 
 
 @torch.no_grad()
 def generate(
-    pipeline: FluxPipeline,
+    pipeline: StableDiffusion3Pipeline,
     prompt: Union[str, List[str]] = None,
     prompt_2: Optional[Union[str, List[str]]] = None,
+    prompt_3: Optional[Union[str, List[str]]] = None,
     height: Optional[int] = 512,
     width: Optional[int] = 512,
     num_inference_steps: int = 28,
@@ -498,6 +458,7 @@ def generate(
     self.check_inputs(
         prompt,
         prompt_2,
+        prompt_3,
         height,
         width,
         prompt_embeds=prompt_embeds,
@@ -521,12 +482,12 @@ def generate(
 
     # Prepare prompt embeddings
     (
-        prompt_embeds,
-        pooled_prompt_embeds,
-        text_ids,
+        prompt_embeds, _,
+        pooled_prompt_embeds, _
     ) = self.encode_prompt(
         prompt=prompt,
         prompt_2=prompt_2,
+        prompt_3=prompt_3,
         prompt_embeds=prompt_embeds,
         pooled_prompt_embeds=pooled_prompt_embeds,
         device=device,
@@ -535,8 +496,8 @@ def generate(
     )
 
     # Prepare latent variables
-    num_channels_latents = self.transformer.config.in_channels // 4
-    latents, latent_image_ids = self.prepare_latents(
+    num_channels_latents = self.transformer.config.in_channels 
+    latents = self.prepare_latents(
         batch_size * num_images_per_prompt,
         num_channels_latents,
         height,
@@ -550,31 +511,31 @@ def generate(
     if latent_mask is not None:
         latent_mask = latent_mask.T.reshape(-1)
         latents = latents[:, latent_mask]
-        latent_image_ids = latent_image_ids[latent_mask]
 
     # Prepare conditions
-    c_latents, uc_latents, c_ids, c_timesteps = ([], [], [], [])
-    c_projections, c_guidances, c_adapters = ([], [], [])
+    c_latents, uc_latents, c_timesteps = ([], [], [])
+    c_projections, c_adapters = ([], [])
     complement_cond = None
     for condition in conditions:
-        tokens, ids = condition.encode(self)
+        tokens = condition.encode(self)
         c_latents.append(tokens)  # [batch_size, token_n, token_dim]
         # Empty condition for unconditioned image
         if image_guidance_scale != 1.0:
-            uc_latents.append(condition.encode(self, empty=True)[0])
-        c_ids.append(ids)  # [token_n, id_dim(3)]
+            uc_latents.append(condition.encode(self, empty=True))
         c_timesteps.append(torch.zeros([batch_size], device=device))
         c_projections.append(pooled_prompt_embeds)
-        c_guidances.append(torch.ones([batch_size], device=device))
         c_adapters.append(condition.adapter)
         # This complement_condition will be combined with the original image.
         # See the token integration of OminiControl2 [https://arxiv.org/abs/2503.08280]
         if condition.is_complement:
-            complement_cond = (tokens, ids)
+            complement_cond = tokens
 
     # Prepare timesteps
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
-    image_seq_len = latents.shape[1]
+    _, _, height, width = latents.shape
+    image_seq_len = (height // self.transformer.config.patch_size) * (
+        width // self.transformer.config.patch_size
+    )
     mu = calculate_shift(
         image_seq_len,
         self.scheduler.config.base_image_seq_len,
@@ -619,13 +580,6 @@ def generate(
         # broadcast to batch dimension in a way that's compatible with ONNX/Core ML
         timestep = t.expand(latents.shape[0]).to(latents.dtype) / 1000
 
-        # handle guidance
-        if self.transformer.config.guidance_embeds:
-            guidance = torch.tensor([guidance_scale], device=device)
-            guidance = guidance.expand(latents.shape[0])
-        else:
-            guidance, c_guidances = None, [None for _ in c_guidances]
-
         if kv_cache:
             mode = "write" if i == 0 else "read"
             if mode == "write":
@@ -637,12 +591,9 @@ def generate(
             self.transformer,
             image_features=[latents] + (c_latents if use_cond else []),
             text_features=[prompt_embeds],
-            img_ids=[latent_image_ids] + (c_ids if use_cond else []),
-            txt_ids=[text_ids],
             timesteps=[timestep, timestep] + (c_timesteps if use_cond else []),
             pooled_projections=[pooled_prompt_embeds] * 2
             + (c_projections if use_cond else []),
-            guidances=[guidance] * 2 + (c_guidances if use_cond else []),
             return_dict=False,
             adapters=[main_adapter] * 2 + (c_adapters if use_cond else []),
             cache_mode=mode if kv_cache else None,
@@ -657,12 +608,9 @@ def generate(
                 self.transformer,
                 image_features=[latents] + (uc_latents if use_cond else []),
                 text_features=[prompt_embeds],
-                img_ids=[latent_image_ids] + (c_ids if use_cond else []),
-                txt_ids=[text_ids],
                 timesteps=[timestep, timestep] + (c_timesteps if use_cond else []),
                 pooled_projections=[pooled_prompt_embeds] * 2
                 + (c_projections if use_cond else []),
-                guidances=[guidance] * 2 + (c_guidances if use_cond else []),
                 return_dict=False,
                 adapters=[main_adapter] * 2 + (c_adapters if use_cond else []),
                 cache_mode=mode if kv_cache else None,
@@ -672,8 +620,7 @@ def generate(
             )[0]
 
             noise_pred = unc_pred + image_guidance_scale * (noise_pred - unc_pred)
-        # import ipdb
-        # ipdb.set_trace()
+
         # compute the previous noisy sample x_t -> x_t-1
         latents_dtype = latents.dtype
         latents = self.scheduler.step(noise_pred, t, latents)[0]
@@ -723,7 +670,7 @@ def generate(
     if output_type == "latent":
         image = latents
     else:
-        latents = self._unpack_latents(latents, height, width, self.vae_scale_factor)
+
         latents = (
             latents / self.vae.config.scaling_factor
         ) + self.vae.config.shift_factor
@@ -736,4 +683,4 @@ def generate(
     if not return_dict:
         return (image,)
 
-    return FluxPipelineOutput(images=image)
+    return StableDiffusion3PipelineOutput(images=image)

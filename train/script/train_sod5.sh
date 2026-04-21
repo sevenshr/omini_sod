@@ -1,5 +1,5 @@
 # *[Specify the config file path and the GPU devices to use]
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 # *[Specify the config file path]
 export OMINI_CONFIG=./train/config/sod.yaml
@@ -11,9 +11,9 @@ echo $OMINI_CONFIG
 export TOKENIZERS_PARALLELISM=true
 
 accelerate launch \
-  --num_processes 4 \
+  --num_processes 1 \
   --num_machines 1 \
   --mixed_precision bf16 \
   --dynamo_backend no \
   --main_process_port 41370 \
-  -m omini.train_flux.train_sod2_multi
+  -m omini.train_flux.train_sod2_multi_ddp_sd

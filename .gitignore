@@ -5,3 +5,5 @@
 /wandb/
 /assets/
 /examples/
+/sd3.5/
+*.pyc
