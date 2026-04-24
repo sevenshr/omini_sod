@@ -152,7 +152,7 @@ def attn_forward(
     attn: Attention,
     hidden_states: List[torch.FloatTensor],
     adapters: List[str],
-    hidden_states2: Optional[List[torch.FloatTensor]] = [],
+    hidden_states2: Optional[List[torch.FloatTensor]] = None,
     position_embs: Optional[List[torch.Tensor]] = None,
     group_mask: Optional[torch.Tensor] = None,
     cache_mode: Optional[str] = None,
@@ -163,7 +163,7 @@ def attn_forward(
 ) -> torch.FloatTensor:
     bs, _, _ = hidden_states[0].shape
     h2_n = len(hidden_states2) if hidden_states2 is not None else 0
-
+    len_i = len(hidden_states)
     queries, keys, values = [], [], []
 
     # Prepare query, key, value for each encoder hidden state (text branch)
@@ -182,6 +182,10 @@ def attn_forward(
             queries.append(query)
             keys.append(key)
             values.append(value)
+
+    else: 
+        adapters = adapters[-len_i:]
+        group_mask = group_mask[-len_i:,-len_i:]
 
     # Prepare query, key, value for each hidden state (image branch)
     for i, hidden_state in enumerate(hidden_states):
@@ -204,15 +208,15 @@ def attn_forward(
         values.append(value)
 
     # Apply rotary embedding
-    if position_embs is not None:
-        queries = [apply_rotary_emb(q, position_embs[i]) for i, q in enumerate(queries)]
-        keys = [apply_rotary_emb(k, position_embs[i]) for i, k in enumerate(keys)]
+    # if position_embs is not None:
+    #     queries = [apply_rotary_emb(q, position_embs[i]) for i, q in enumerate(queries)]
+    #     keys = [apply_rotary_emb(k, position_embs[i]) for i, k in enumerate(keys)]
 
-    if cache_mode == "write":
-        for i, (k, v) in enumerate(zip(keys, values)):
-            if to_cache[i]:
-                cache_storage[attn.cache_idx][0].append(k)
-                cache_storage[attn.cache_idx][1].append(v)
+    # if cache_mode == "write":
+    #     for i, (k, v) in enumerate(zip(keys, values)):
+    #         if to_cache[i]:
+    #             cache_storage[attn.cache_idx][0].append(k)
+    #             cache_storage[attn.cache_idx][1].append(v)
 
     attn_outputs = []
     for i, query in enumerate(queries):
@@ -223,9 +227,9 @@ def attn_forward(
                 continue
             keys_.append(k)
             values_.append(v)
-        if cache_mode == "read":
-            keys_.extend(cache_storage[attn.cache_idx][0])
-            values_.extend(cache_storage[attn.cache_idx][1])
+        # if cache_mode == "read":
+        #     keys_.extend(cache_storage[attn.cache_idx][0])
+        #     values_.extend(cache_storage[attn.cache_idx][1])
         # Add keys and values from cache TODO
         # Attention computation
         attn_output = F.scaled_dot_product_attention(

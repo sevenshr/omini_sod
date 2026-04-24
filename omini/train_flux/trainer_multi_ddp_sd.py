@@ -87,7 +87,6 @@ class OminiModel(L.LightningModule):
 
         # Initialize LoRA layers
         self.lora_layers = self.init_lora(lora_path, lora_config)
-
         self.to(device).to(dtype)
 
         self.val_metrics = {}
@@ -112,6 +111,7 @@ class OminiModel(L.LightningModule):
                 self.transformer.add_adapter(
                     LoraConfig(**lora_config), adapter_name=adapter_name
                 )
+            self.transformer.set_adapter(self.adapter_set)
             # TODO: Check if this is correct (p.requires_grad)
             lora_layers = filter(
                 lambda p: p.requires_grad, self.transformer.parameters()
@@ -211,9 +211,6 @@ class OminiModel(L.LightningModule):
             ):
                 # Prepare conditions
                 c_latents = encode_images(self.sd_pipe, cond)
-                
-                if len(p_delta) > 1:
-                    print("Warning: only the first position delta is used.")
                 # Append to the list
                 if latent_mask is not None:
                     c_latents = c_latents[latent_mask]
@@ -284,13 +281,10 @@ class OminiModel(L.LightningModule):
         bs = batch["image"].shape[0]
         image_latent_mask = batch.get("image_latent_mask", None)
         conditions_use, conditions, position_deltas, position_scales, latent_masks = [], [], [], [], []
-        if len(self.adapter_names)>4:
-            if prompts == "RGB and thermal to mask":
-                use_adapters = self.adapter_names[:3] + self.adapter_names[-1] 
-            else:
-                use_adapters = self.adapter_names[:branch_n]
+        if len(self.adapter_names)>4 and prompts == "RGB and thermal to mask":
+            use_adapters = self.adapter_names[:3] + self.adapter_names[-1] 
         else:
-            use_adapters = self.adapter_names[:branch_n]
+            use_adapters = self.adapter_names
 
         for i in range(1000):
             if f"condition_{i}" not in batch:
@@ -559,7 +553,7 @@ def train(train_dataset, trainable_model, config, test_function, val_datasets, b
 
     # Save the training config
     save_path = training_config.get("save_path", "./output")
-    if is_main_process:
+    if wandb_config is not None and is_main_process:
         os.makedirs(f"{save_path}/{run_name}")
         with open(f"{save_path}/{run_name}/config.yaml", "w") as f:
             yaml.dump(config, f)

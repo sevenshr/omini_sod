@@ -38,7 +38,7 @@ train:
     drop_text_prob: 0.1
     drop_image_prob: 0.1
 
-  batch_size: 16
+  batch_size: 2
   train_dataset:
     image_root: /root/user-data/dataset/shr_data/DUTS-TR/DUTS-TR-Image/
     gt_root: /root/user-data/dataset/shr_data/DUTS-TR/DUTS-TR-Mask/
@@ -50,8 +50,8 @@ train:
     depth_root: /root/user-data/dataset/shr_data/DUTS-TE/DUTS-TE-Image/
     valsize: 512
 
-  wandb:
-    project: "OminiControl"
+  # wandb:
+  #   project: "OminiControl"
 
   lora_config:
     r: 4

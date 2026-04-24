@@ -1,8 +1,8 @@
 # *[Specify the config file path and the GPU devices to use]
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com
 # *[Specify the config file path]
-export OMINI_CONFIG=./train/config/sod_sd.yaml
+export OMINI_CONFIG=./train/config/sod2.yaml
 
 # *[Specify the WANDB API key]
 # export WANDB_API_KEY='YOUR_WANDB_API_KEY'
@@ -11,7 +11,7 @@ echo $OMINI_CONFIG
 export TOKENIZERS_PARALLELISM=true
 
 accelerate launch \
-  --num_processes 4 \
+  --num_processes 1 \
   --num_machines 1 \
   --mixed_precision bf16 \
   --dynamo_backend no \
